@@ -19,17 +19,13 @@ import { museLimiter } from "./limiter.js";
 export const MUSE_BIN_DEFAULT = "/home/rohan/.local/bin/muse";
 export const MUSE_PROVIDER = "meta";
 export const MUSE_MODEL = "muse-spark-1.3-contributor";
-export const MUSE_REASONING_EFFORT = "high";
+export const MUSE_REASONING_EFFORT = "max";
 export const MUSE_MAX_MODEL_STEPS = "50";
-// Questions/answers run in scratch workspaces and need far less deliberation
-// than repo work (plus fewer tool steps — Q&A rarely needs more than a few
-// read-only calls). Compute budget only; the same model gets the full prompt
-// and full latitude either way.
-export const MUSE_QUICK_REASONING_EFFORT = "low";
+// Policy: reasoning is max on every call (gate, ticket, work). The stages
+// differ only in step budgets and tools, never in thinking effort.
+export const MUSE_QUICK_REASONING_EFFORT = "max";
 export const MUSE_QUICK_MAX_MODEL_STEPS = "15";
-// The chat gate only classifies message+ticket-id with no tools, so it runs
-// at the lowest reasoning setting with a tight step cap for fast replies.
-export const MUSE_GATE_REASONING_EFFORT = "minimal";
+export const MUSE_GATE_REASONING_EFFORT = "max";
 export const MUSE_GATE_MAX_MODEL_STEPS = "5";
 
 /** Absolute path of a static asset shipped in dist/ (e.g. output schemas). */

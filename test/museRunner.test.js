@@ -41,7 +41,7 @@ describe("direct Muse runner", () => {
 
   it("defaults to high reasoning effort with full model steps", () => {
     const args = buildMuseArgs({ workspace: "/tmp/work", promptFile: "/tmp/prompt" });
-    assert.equal(args[args.indexOf("--reasoning-effort") + 1], "high");
+    assert.equal(args[args.indexOf("--reasoning-effort") + 1], "max");
     assert.equal(args[args.indexOf("--max-model-steps") + 1], "50");
   });
 

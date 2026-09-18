@@ -71,7 +71,7 @@ describe("chat gate runner", () => {
     assert.deepEqual(g, { mode: "chat", reply: "yo" });
     assert.ok(seen.args.includes("/tmp/chat-ws"));
     const effort = seen.args[seen.args.indexOf("--reasoning-effort") + 1];
-    assert.equal(effort, "minimal");
+    assert.equal(effort, "max");
     const steps = seen.args[seen.args.indexOf("--max-model-steps") + 1];
     assert.equal(steps, "5");
     assert.ok(seen.args.includes("--disable-web-tools"));

@@ -8,7 +8,8 @@
     "questions",
     "changed_files",
     "validation_performed",
-    "residual_risks"
+    "residual_risks",
+    "wants_work"
   ],
   "properties": {
     "status": {

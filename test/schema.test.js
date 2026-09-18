@@ -9,8 +9,20 @@ describe("muse-output-schema", () => {
     const raw = readFileSync(schemaPath, "utf-8");
     const schema = JSON.parse(raw);
     assert.equal(schema.type, "object");
-    assert.deepEqual(schema.required.sort(), ["changed_files","questions","residual_risks","status","summary","validation_performed"].sort());
+    assert.deepEqual(schema.required.sort(), ["changed_files","questions","residual_risks","status","summary","validation_performed","wants_work"].sort());
     assert.equal(schema.additionalProperties, false);
+  });
+
+  it("satisfies the provider rule: required includes every property key", () => {
+    // The meta API rejects --output-schema files whose required array omits
+    // any property key (400 invalid_request_error). Both shipped schemas must
+    // obey this, or every model call fails.
+    for (const name of ["muse-output-schema.json", "chat-gate-schema.json"]) {
+      const schema = JSON.parse(readFileSync(join(process.cwd(), `dist/${name}`), "utf-8"));
+      for (const key of Object.keys(schema.properties)) {
+        assert.ok(schema.required.includes(key), `${name}: required omits property '${key}'`);
+      }
+    }
   });
 
   it("has explicit type for enum fields", () => {

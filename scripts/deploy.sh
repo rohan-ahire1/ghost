@@ -28,7 +28,7 @@ rsync -av --delete --exclude node_modules --exclude dist ./ "$REMOTE:$REMOTE_DIR
 
 echo "==> [3/5] Building and testing on VPS (deploy stops here on failure)"
 # shellcheck disable=SC2029
-ssh "$REMOTE" "cd '$REMOTE_DIR' && npm install --no-audit --no-fund --cache /tmp/npm-cache && npm test 2>&1 | tail -n 8"
+ssh "$REMOTE" "export PATH=/home/rohan/.local/bin:\$PATH && cd '$REMOTE_DIR' && npm install --no-audit --no-fund --cache /tmp/npm-cache && npm test 2>&1 | tail -n 8"
 
 echo "==> [4/5] Restarting ghost.service"
 # shellcheck disable=SC2029

@@ -4,7 +4,7 @@ import type { GhostJobContext } from "./sessionTypes.js";
 import { buildMusePrompt, runMuse, ProgressTracker, createProgressPoster, MUSE_QUICK_REASONING_EFFORT, MUSE_QUICK_MAX_MODEL_STEPS, type MuseResult } from "./museRunner.js";
 import { ensureWorktree, validateWorktree, commitAndPush, getChangedFiles, cleanupWorktreeIfAllowed, pruneLocalBranchIfSafe } from "./gitPipeline.js";
 import { createPullRequest, getGithubToken } from "./github.js";
-import { getCompareUrl } from "./repoResolver.js";
+import { getCompareUrl, resolveRepository, buildBranchName } from "./repoResolver.js";
 import { runCommand, sanitizeError } from "./commandRunner.js";
 import { postActivity, persistMuseResult, handleBlocked, sanitizeModelString, sanitizeModelResult } from "./activities.js";
 import { mkdirSync, chmodSync } from "node:fs";
@@ -150,18 +150,28 @@ export async function invokeMuseOnce(opts: {
   return muse;
 }
 
-export async function runScratchPipeline(opts: {
+/**
+ * Ticket stage: the chat gate already decided this message needs the ticket.
+ * Run one model call with the full ticket in scratch. The model answers
+ * read-only questions directly, returns blocked when the user must supply
+ * information, or sets wants_work when repository code changes are needed —
+ * only then is a repo resolved and the work pipeline started.
+ */
+export async function runTicketPipeline(opts: {
   ctx: GhostJobContext;
   dataDir: string;
   jobStore: JobStore;
   tokenManager: LinearTokenManager;
+  runner: typeof runCommand;
+  fetchFn: typeof fetch;
   createActivityFn: typeof createAgentActivity;
   museRunner: typeof runMuse;
   scratchPath?: string;
-  repoResolution?: { candidates: string[]; reason: string };
-  directive?: string;
+  message?: string;
+  /** Repo resolved on an earlier turn of this session. Reused only when this turn's text names no repo. */
+  knownRepo?: { id: string; path: string; github: string };
 }): Promise<void> {
-  const { ctx, dataDir, jobStore, tokenManager, createActivityFn, museRunner, repoResolution, directive } = opts;
+  const { ctx, dataDir, jobStore, tokenManager, runner, fetchFn, createActivityFn, museRunner, message, knownRepo } = opts;
 
   // Private per-session workspace. Never enters git/PR operations.
   const scratchPath = opts.scratchPath || ensureScratchWorkspace(dataDir, ctx.agentSessionId);
@@ -175,18 +185,17 @@ export async function runScratchPipeline(opts: {
     }
   });
 
-  console.log(JSON.stringify({ msg: "scratch workspace ready", scratchPath, sessionId: ctx.agentSessionId }));
+  console.log(JSON.stringify({ msg: "ticket workspace ready", scratchPath, sessionId: ctx.agentSessionId }));
 
   const muse = await invokeMuseOnce({
     ctx,
     workspacePath: scratchPath,
     workspaceKind: "scratch",
-    repoResolution,
     jobStore,
     tokenManager,
     createActivityFn,
     museRunner,
-    directive,
+    directive: message,
   });
 
   if (muse.status === "blocked") {
@@ -194,8 +203,69 @@ export async function runScratchPipeline(opts: {
     return;
   }
 
-  // No files gate here: a scratch workspace never enters git/PR operations.
-  // Post Muse's summary directly as the Linear response and complete.
+  if (muse.wants_work === true) {
+    // This turn's message first, so a clarification like "use flaggo"
+    // overrides an ambiguous original title; otherwise the combined context.
+    const followOnly = message
+      ? resolveRepository({ promptContext: message })
+      : null;
+    const repoResult = followOnly && followOnly.repo
+      ? followOnly
+      : resolveRepository({
+        issueIdentifier: ctx.issueIdentifier,
+        issueTitle: ctx.issueTitle,
+        promptContext: [ctx.promptContext, message].filter(Boolean).join("\n"),
+        rawPayload: ctx.rawPayload,
+      });
+    // Follow-up turns ("do it", "continue") often name no repo: reuse the
+    // session's known repo. An explicit single match always wins (redirects
+    // like "use flaggo" work); ambiguity still asks the user.
+    const repo = repoResult.repo || (repoResult.candidates.length === 0 ? knownRepo || null : null);
+    if (!repo) {
+      await jobStore.withSessionLock(ctx.agentSessionId, async () => {
+        const rec = jobStore.load(ctx.agentSessionId);
+        if (rec) {
+          rec.status = "awaiting_input";
+          jobStore.save(rec);
+        }
+      });
+      const question =
+        repoResult.elicitation ||
+        "Which repository should I work in? Reply with one repo name.";
+      await postActivity(tokenManager, ctx.agentSessionId, { type: "elicitation", body: question }, createActivityFn);
+      console.log(JSON.stringify({ msg: "wants work but repo unresolved, eliciting", reason: repoResult.reason, sessionId: ctx.agentSessionId }));
+      return;
+    }
+    const branch = buildBranchName(ctx.issueIdentifier, ctx.agentSessionId);
+    console.log(JSON.stringify({ msg: "repo resolved", repo: repo.id, branch, sessionId: ctx.agentSessionId }));
+    await jobStore.withSessionLock(ctx.agentSessionId, async () => {
+      const rec = jobStore.load(ctx.agentSessionId);
+      if (rec) {
+        rec.repo = { id: repo.id, path: repo.path, github: repo.github };
+        rec.branch = branch;
+        rec.workspaceKind = "repo";
+        jobStore.save(rec);
+      }
+    });
+    await postActivity(tokenManager, ctx.agentSessionId, { type: "thought", body: `🔍 Resolved repository **${repo.id}** (\`${repo.github}\`) · branch \`${branch}\`` }, createActivityFn);
+    await runRepoPipeline({
+      ctx,
+      repo,
+      branch,
+      dataDir,
+      worktreesDir: getWorktreesDir(dataDir),
+      jobStore,
+      tokenManager,
+      runner,
+      fetchFn,
+      createActivityFn,
+      museRunner,
+      directive: message,
+    });
+    return;
+  }
+
+  // Answered from the ticket: post bare and complete. No worktree, no commit.
   await jobStore.withSessionLock(ctx.agentSessionId, async () => {
     const rec = jobStore.load(ctx.agentSessionId);
     if (rec) {
@@ -208,12 +278,10 @@ export async function runScratchPipeline(opts: {
   const safeRisks = muse.residual_risks.length > 0
     ? `\n\nResidual risks: ${sanitizeModelString(muse.residual_risks.join("; "), 500)}`
     : "";
-  // Scratch answers post bare: no task header. Claiming a finished issue on a
-  // plain answer is wrong, and the answer needs no framing.
   const finalBody = `${safeSummary}${safeRisks}`;
   await postActivity(tokenManager, ctx.agentSessionId, { type: "response", body: sanitizeModelString(finalBody, 6000) }, createActivityFn);
 
-  console.log(JSON.stringify({ msg: "Ghost scratch pipeline completed", sessionId: ctx.agentSessionId }));
+  console.log(JSON.stringify({ msg: "Ghost ticket pipeline completed", sessionId: ctx.agentSessionId }));
 }
 
 export async function runRepoPipeline(opts: {

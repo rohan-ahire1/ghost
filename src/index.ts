@@ -10,7 +10,7 @@ import {
   logAgentSessionMetadata,
 } from "./agentSession.js";
 import { sanitizeError } from "./commandRunner.js";
-import { JobStore } from "./jobStore.js";
+import { JobStore, pruneOldData } from "./jobStore.js";
 import { summarizeJob, detailJob, getOpsSnapshot } from "./ops.js";
 
 const config = loadConfig();
@@ -20,6 +20,8 @@ const stateStore = new OAuthStateStore(config.dataDir);
 const replayStore = new WebhookReplayStore(config.dataDir);
 const tokenManager = new LinearTokenManager(tokenStore, config.clientId, config.clientSecret, config.linearApiKey);
 const jobStore = new JobStore(config.dataDir);
+// Drop job/scratch/worktree history older than 30 days on every boot.
+pruneOldData(config.dataDir);
 
 const app = express();
 app.disable("x-powered-by");
@@ -122,7 +124,15 @@ app.get("/jobs/:id", (req, res) => {
 });
 
 // ---------- OAuth install (one-time: app tokens are the only auth that can post agent activities) ----------
+// Loopback-only: anyone who can mint an install state could otherwise complete
+// OAuth with their own Linear org and overwrite the stored tokens. The
+// callback below stays public (Linear redirects the browser to it) but only
+// accepts states initiated locally. Install over SSH: curl 127.0.0.1:8791/linear/install
 app.get("/linear/install", (req, res) => {
+  if (!isLoopback(req)) {
+    res.status(404).json({ error: "Not found", path: req.path });
+    return;
+  }
   try {
     const state = stateStore.generate();
     const params = new URLSearchParams({

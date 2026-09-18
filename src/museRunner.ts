@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { runCommand } from "./commandRunner.js";
 import { sanitizeError } from "./commandRunner.js";
 import { buildMuseEnv } from "./childEnv.js";
+import { museLimiter } from "./limiter.js";
 
 /**
  * Direct Muse invocation for a Linear AgentSession request.
@@ -33,6 +34,8 @@ export interface MuseResult {
   changed_files: string[];
   validation_performed: string[];
   residual_risks: string[];
+  /** Scratch/ticket calls set this when repository code changes are needed. */
+  wants_work?: boolean;
 }
 
 export interface MuseRunOptions {
@@ -109,8 +112,8 @@ export function createProgressPoster(
   post: (body: string) => void,
   opts: ProgressPosterOpts = {},
 ): (line: string) => void {
-  const minMs = opts.minMs ?? 12_000;
-  const maxPosts = opts.maxPosts ?? 25;
+  const minMs = opts.minMs ?? 20_000;
+  const maxPosts = opts.maxPosts ?? 8;
   const now = opts.now ?? Date.now;
   let posts = 0;
   let last = 0;
@@ -232,7 +235,7 @@ export function buildMusePrompt(params: {
     }
   } else {
     lines.push(
-      "You are inside a private per-session scratch workspace. No single repository was resolved for this task, so there is nothing to commit or push.",
+      "You are inside a private per-session scratch workspace with the full ticket below. There is nothing to commit or push here.",
     );
     if (resolutionReason) {
       lines.push(`Repository resolution: ${resolutionReason.slice(0, 500)}.`);
@@ -241,12 +244,15 @@ export function buildMusePrompt(params: {
       lines.push(
         `Candidate repositories: ${candidates.slice(0, 10).join(", ")}.`,
       );
-      lines.push(
-        "This request may span repositories — for example, summarize the ticket directly without editing files when no change is needed.",
-      );
     }
     lines.push(
-      "Answer read/summary/general questions directly without editing files when possible. If the task genuinely requires modifying a repository, do NOT edit scratch files as a substitute — return blocked and ask which repository to use.",
+      "Read-only first: answer questions, summaries, and explanations directly from the ticket without editing files.",
+    );
+    lines.push(
+      "If and only if the request needs code changes in a repository, do NOT edit scratch files — return completed with wants_work set to true and describe the work in summary. A coding session with the repository will run next.",
+    );
+    lines.push(
+      "If you are blocked by missing information that the user must supply, return blocked with concise questions.",
     );
   }
   lines.push("");
@@ -282,15 +288,18 @@ export function buildMusePrompt(params: {
     lines.push("");
   }
   lines.push("How to respond:");
-  lines.push(
-    "- If the request is a question, greeting, or smalltalk: answer it directly in a sentence or two and stop. Never mention the issue, worktrees, branches, or completion; never ask what the user wants to work on; never introduce yourself or name the model.",
-  );
-  lines.push(
-    "- For anything else needing no file change: answer directly, editing nothing.",
-  );
-  lines.push(
-    "- To implement/fix/build: edit files in this workspace only, keeping changes focused and consistent with existing style.",
-  );
+  if (workspaceKind === "repo") {
+    lines.push(
+      "- To implement/fix/build: edit files in this workspace only, keeping changes focused and consistent with existing style.",
+    );
+    lines.push(
+      "- For anything needing no file change: answer directly, editing nothing.",
+    );
+  } else {
+    lines.push(
+      "- Answer from the ticket; edit nothing. Set wants_work to true only when repository code changes are needed.",
+    );
+  }
   lines.push(
     "- If you are blocked by missing information: return blocked with concise questions.",
   );
@@ -300,7 +309,7 @@ export function buildMusePrompt(params: {
   );
   lines.push("");
   lines.push(
-    "Output: Return ONLY the strict JSON object with keys status (completed|blocked), summary (string), questions (string[]), changed_files (string[]), validation_performed (string[]), residual_risks (string[]). No extra prose outside JSON.",
+    "Output: Return ONLY the strict JSON object with keys status (completed|blocked), summary (string), questions (string[]), changed_files (string[]), validation_performed (string[]), residual_risks (string[]) and wants_work (boolean, true only when repository code changes are needed). No extra prose outside JSON.",
   );
 
   return lines.join("\n");
@@ -531,21 +540,23 @@ export async function runMuse(opts: MuseRunOptions): Promise<MuseResult> {
   const onProgressLine = opts.onProgressLine;
   let result: Awaited<ReturnType<typeof runner>>;
   try {
-    result = await runner({
-      command: museBin,
-      args,
-      input: undefined,
-      timeoutMs,
-      maxOutputBytes: 2_000_000,
-      env: museEnv,
-      onStdoutLine: onProgressLine
-        ? (line: string) => {
-          try {
-            onProgressLine(line);
-          } catch {}
-        }
-        : undefined,
-    });
+    result = await museLimiter.run(() =>
+      runner({
+        command: museBin,
+        args,
+        input: undefined,
+        timeoutMs,
+        maxOutputBytes: 2_000_000,
+        env: museEnv,
+        onStdoutLine: onProgressLine
+          ? (line: string) => {
+            try {
+              onProgressLine(line);
+            } catch {}
+          }
+          : undefined,
+      }),
+    );
   } finally {
     cleanupPromptFile();
   }
@@ -589,6 +600,7 @@ export async function runMuse(opts: MuseRunOptions): Promise<MuseResult> {
         changed_files: [],
         validation_performed: [],
         residual_risks: ["Ghost degraded mode: Muse returned prose instead of structured JSON; summary taken from raw reply."],
+        wants_work: false,
       };
     }
 

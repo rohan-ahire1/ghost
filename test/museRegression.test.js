@@ -345,7 +345,7 @@ describe("Muse regression: Full lifecycle no-repo clarification", ()=>{
         residual_risks:[]
       };
     };
-    await handleAgentSessionCreated(ctx, mockTokenManager(), { dataDir:dir, createActivity: mockCreateActivity, museRunner: blockedMuse });
+    await handleAgentSessionCreated(ctx, mockTokenManager(), { dataDir:dir, createActivity: mockCreateActivity, chatRunner: async () => ({ mode: "fetch", reply: "" }), museRunner: blockedMuse });
 
     const store = new JobStore(dir);
     const job = store.load("no-repo-sess-1");
@@ -369,7 +369,8 @@ describe("Muse regression: Full lifecycle no-repo clarification", ()=>{
         questions:[],
         changed_files:["README.md"],
         validation_performed:["test"],
-        residual_risks:[]
+        residual_risks:[],
+        wants_work:true,
       };
     };
     // Mock runner that simulates git pipeline without real git/network
@@ -409,14 +410,14 @@ describe("Muse regression: Full lifecycle no-repo clarification", ()=>{
       agentSession: { id: "no-repo-sess-1" },
       agentActivity: { body: "use scoutline please" }
     };
-    await handleAgentSessionPrompted(payload, mockTokenManager(), { dataDir:dir, runner: mockRunner, createActivity: mockCreateActivity, museRunner: mockMuse, fetchFn: mockFetch });
+    await handleAgentSessionPrompted(payload, mockTokenManager(), { dataDir:dir, runner: mockRunner, createActivity: mockCreateActivity, chatRunner: async () => ({ mode: "fetch", reply: "" }), museRunner: mockMuse, fetchFn: mockFetch });
 
     const after = store.load("no-repo-sess-1");
     assert.ok(after, "job should still exist");
     assert.ok(after.repo, "repo should be persisted after follow-up");
     assert.equal(after.repo.id, "scoutline");
     assert.ok(after.branch?.startsWith("ghost/"), `branch ${after.branch}`);
-    assert.equal(museCalls, 2, `each request should invoke Muse once, got ${museCalls}`);
+    assert.equal(museCalls, 3, `blocked turn + ticket decision + work execution, got ${museCalls}`);
     // Ensure status is not awaiting_input anymore (running/completed/failed) — but after mocked pipeline with successful muse and push, should be completed
     assert.ok(["running","completed","failed"].includes(after.status), `status ${after.status} unexpected`);
     assert.equal(after.status, "completed");
@@ -459,6 +460,7 @@ describe("Muse regression: Full lifecycle multi-repo clarification", ()=>{
     await handleAgentSessionCreated(ctx, mockTokenManager(), {
       dataDir:dir,
       createActivity: mockCreateActivity,
+      chatRunner: async () => ({ mode: "fetch", reply: "" }),
       museRunner: async () => {
         museCalls++;
         return {
@@ -492,7 +494,8 @@ describe("Muse regression: Full lifecycle multi-repo clarification", ()=>{
         questions:[],
         changed_files:["src/index.ts"],
         validation_performed:[],
-        residual_risks:[]
+        residual_risks:[],
+        wants_work:true,
       };
     };
     const mockRunner = async (opts)=>{
@@ -521,13 +524,13 @@ describe("Muse regression: Full lifecycle multi-repo clarification", ()=>{
       agentSession: { id: "multi-clarify-1"},
       agentActivity: { body: "use flaggo only" }
     };
-    await handleAgentSessionPrompted(payload, mockTokenManager(), { dataDir:dir, runner: mockRunner, createActivity: mockCreateActivity, museRunner: mockMuse, fetchFn: mockFetch });
+    await handleAgentSessionPrompted(payload, mockTokenManager(), { dataDir:dir, runner: mockRunner, createActivity: mockCreateActivity, chatRunner: async () => ({ mode: "fetch", reply: "" }), museRunner: mockMuse, fetchFn: mockFetch });
 
     job = store.load("multi-clarify-1");
     assert.ok(job.repo, "repo should be set after clarification");
     assert.equal(job.repo.id, "flaggo", `expected flaggo but got ${job.repo.id}`);
     assert.ok(job.branch?.startsWith("ghost/"));
-    assert.equal(museCalls, 2, `each request should invoke Muse once, got ${museCalls}`);
+    assert.equal(museCalls, 3, `blocked turn + ticket decision + work execution, got ${museCalls}`);
     // Without duplicate execution: ensure not called twice and job status is completed (not awaiting_input)
     assert.equal(job.status, "completed");
     assert.ok(job.followUps.some(f=> f.includes("flaggo")));
@@ -536,7 +539,7 @@ describe("Muse regression: Full lifecycle multi-repo clarification", ()=>{
     const callsBefore = museCalls;
     activities=[];
     const payload2 = { agentSession:{id:"multi-clarify-1"}, agentActivity:{body:"another follow up"} };
-    await handleAgentSessionPrompted(payload2, mockTokenManager(), { dataDir:dir, runner: mockRunner, createActivity: mockCreateActivity, museRunner: mockMuse, fetchFn: mockFetch });
+    await handleAgentSessionPrompted(payload2, mockTokenManager(), { dataDir:dir, runner: mockRunner, createActivity: mockCreateActivity, chatRunner: async () => ({ mode: "fetch", reply: "" }), museRunner: mockMuse, fetchFn: mockFetch });
     assert.equal(museCalls, callsBefore + 1, "completed job plus new text runs one more turn");
     assert.ok(!activities.some(a=> a.content.body?.includes("already completed")));
     assert.ok(!activities.some(a=> a.content.body?.includes("Setting up isolated worktree")), "smalltalk must not create a worktree");

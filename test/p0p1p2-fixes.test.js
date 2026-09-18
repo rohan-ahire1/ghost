@@ -135,6 +135,7 @@ describe("P0 — Muse output secret leakage: persistence and Linear/GitHub redac
         validation_performed: ["test"],
         review_verdict: "REVIEW_PASS",
         residual_risks: risksWithSecrets,
+        wants_work: true,
       });
 
       const { handleAgentSessionCreated } = await import("../dist/agentSession.js");
@@ -175,6 +176,7 @@ describe("P0 — Muse output secret leakage: persistence and Linear/GitHub redac
         dataDir: dir,
         runner: mockRunner,
         createActivity: mockCreateActivity,
+        chatRunner: async () => ({ mode: "fetch", reply: "" }),
         museRunner: mockMuse,
         fetchFn: mockFetch,
       });
@@ -289,6 +291,7 @@ describe("P0 — Muse output secret leakage: persistence and Linear/GitHub redac
         dataDir: dir,
         runner: runCommand,
         createActivity: mockCreateActivity,
+        chatRunner: async () => ({ mode: "fetch", reply: "" }),
         museRunner: mockMuse,
       });
       const { JobStore } = await import("../dist/jobStore.js");
@@ -365,6 +368,7 @@ describe("P0 — Muse output secret leakage: persistence and Linear/GitHub redac
         dataDir: dir,
         runner: runCommand,
         createActivity: mockCreateActivity,
+        chatRunner: async () => ({ mode: "fetch", reply: "" }),
         museRunner: mockMuse,
       });
       const { JobStore } = await import("../dist/jobStore.js");
@@ -612,6 +616,7 @@ describe("P2 — worktree cleanup containment and terminal behavior", () => {
       changed_files: ["README.md"],
       validation_performed: [],
       residual_risks: [],
+      wants_work: true,
     });
     process.env.GHOST_REPO_SCOUTLINE_PATH = fakeRepoPath;
     const activitiesCompleted = [];
@@ -628,6 +633,7 @@ describe("P2 — worktree cleanup containment and terminal behavior", () => {
       dataDir: dir,
       runner: mockRunner,
       createActivity: mockCreateActivityCompleted,
+      chatRunner: async () => ({ mode: "fetch", reply: "" }),
       museRunner: mockMuseCompleted,
       fetchFn: async (url)=> ({ ok:true, status:200, text: async()=> JSON.stringify([]) }),
     });
@@ -639,9 +645,15 @@ describe("P2 — worktree cleanup containment and terminal behavior", () => {
     assert.ok(removeCallsCompleted.length >= 1, `completed should trigger cleanup, calls: ${JSON.stringify(calls.map(c=> c.args).slice(0,10))}`);
     assert.ok(removeCallsCompleted[0].args.includes(join(worktreesDir, "cleanup-completed-1")), "cleanup path should be inside worktrees");
 
-    // Test failed triggers cleanup
+    // Test failed triggers cleanup: fail AFTER the worktree exists (ticket
+    // stage succeeds, work stage throws), mirroring a mid-pipeline failure.
     calls.length = 0;
-    const mockMuseFailed = async () => { throw new Error("model failed"); };
+    const mockMuseFailed = async (opts) => {
+      if (opts && opts.workspace && opts.workspace.includes("scratch")) {
+        return { status: "completed", summary: "needs work", questions: [], changed_files: [], validation_performed: [], residual_risks: [], wants_work: true };
+      }
+      throw new Error("model failed");
+    };
     const ctxFailed = {
       agentSessionId: "cleanup-failed-1",
       initialPrompt: "fix scoutline cleanup",
@@ -656,6 +668,7 @@ describe("P2 — worktree cleanup containment and terminal behavior", () => {
       dataDir: dir,
       runner: mockRunner,
       createActivity: mockCreateActivityFailed,
+      chatRunner: async () => ({ mode: "fetch", reply: "" }),
       museRunner: mockMuseFailed,
     });
     const jobFailed = store.load("cleanup-failed-1");
@@ -677,6 +690,7 @@ describe("P2 — worktree cleanup containment and terminal behavior", () => {
     await handleAgentSessionCreated(ctxAwait, mockTokenManager(), {
       dataDir: dir,
       createActivity: mockCreateActivityAwait,
+      chatRunner: async () => ({ mode: "fetch", reply: "" }),
       museRunner: async () => ({
         status: "blocked",
         summary: "Need a repository",
@@ -720,11 +734,13 @@ describe("P2 — worktree cleanup containment and terminal behavior", () => {
       changed_files: ["README.md"],
       validation_performed: [],
       residual_risks: [],
+      wants_work: true,
     });
     await handleAgentSessionCreated(ctxCleanupFail, mockTokenManager(), {
       dataDir: dir,
       runner: failingRunner,
       createActivity: async()=> true,
+      chatRunner: async () => ({ mode: "fetch", reply: "" }),
       museRunner: mockMuseOk,
       fetchFn: async()=> ({ ok:true, status:200, text: async()=> JSON.stringify([]) }),
     });

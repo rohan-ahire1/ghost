@@ -150,10 +150,22 @@ export async function ensureWorktree(opts: {
     throw new Error(`Existing directory ${worktreePath} is not a verified worktree for ${opts.branch}; refusing to reuse`);
   }
 
-  // Step 4: remote-branch reuse must not rely solely on directory existence. Require verifiable same-job state or refuse.
+  // Step 4: the branch may already exist on origin when this session pushed
+  // an earlier turn and cleaned up. Branch names carry the session id, so a
+  // different job cannot share this branch — check out the existing branch
+  // for a follow-up turn instead of refusing. Never force anything.
   if (remoteExists) {
-    // Since worktreePath does NOT exist (checked above), this is a different job trying to reuse an existing remote branch — conservatively refuse
-    throw new Error(`Remote branch ${opts.branch} already exists on origin; refusing to overwrite (different job). No local worktree for this session.`);
+    console.log(JSON.stringify({ msg: "git worktree add (existing remote branch)", worktreePath, branch: opts.branch }));
+    const res = await runner({
+      command: "git",
+      args: ["worktree", "add", worktreePath, opts.branch],
+      cwd: opts.targetRepoPath,
+      timeoutMs: 30_000,
+    });
+    if (res.exitCode !== 0) {
+      throw new Error(`git worktree add for existing branch failed (exit ${res.exitCode}): ${res.stderr.slice(0, 400)}`);
+    }
+    return worktreePath;
   }
 
   console.log(JSON.stringify({ msg: "git worktree add", worktreePath, branch: opts.branch }));

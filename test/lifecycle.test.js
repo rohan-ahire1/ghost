@@ -104,6 +104,7 @@ describe("lifecycle: created/prompted", () => {
       dataDir: dir,
       runner: runCommand,
       createActivity: mockCreateActivity,
+      chatRunner: async () => ({ mode: "fetch", reply: "" }),
       museRunner: mockMuse,
       fetchFn: async () => ({ ok: true, status: 200, text: async () => JSON.stringify({ html_url: "https://github.com/rohan-ahire1/scoutline/pull/1" }) }),
     });
@@ -120,6 +121,7 @@ describe("lifecycle: created/prompted", () => {
       dataDir: dir,
       runner: runCommand,
       createActivity: mockCreateActivity,
+      chatRunner: async () => ({ mode: "fetch", reply: "" }),
       museRunner: mockMuse,
     });
 
@@ -153,6 +155,7 @@ describe("lifecycle: created/prompted", () => {
       dataDir: dir,
       runner: gitMustNotRun,
       createActivity: mockCreateActivity,
+      chatRunner: async () => ({ mode: "fetch", reply: "" }),
       museRunner: mockMuse,
     });
     const store = new JobStore(dir);
@@ -183,6 +186,7 @@ describe("lifecycle: created/prompted", () => {
       dataDir: dir,
       runner: gitMustNotRun,
       createActivity: mockCreateActivity,
+      chatRunner: async () => ({ mode: "fetch", reply: "" }),
       museRunner: async () => ({
         status: "completed",
         summary: "Hey! Tell me what to work on.",
@@ -217,6 +221,7 @@ describe("lifecycle: created/prompted", () => {
       dataDir: dir,
       runner: mustNotRun,
       createActivity: mockCreateActivity,
+      chatRunner: mustNotRun,
       museRunner: mustNotRun,
     });
 
@@ -245,6 +250,7 @@ describe("lifecycle: created/prompted", () => {
       dataDir: dir,
       runner: gitMustNotRun,
       createActivity: mockCreateActivity,
+      chatRunner: async () => ({ mode: "fetch", reply: "" }),
       museRunner: async ({ prompt }) => {
         musePrompt = prompt;
         return {
@@ -277,6 +283,7 @@ describe("lifecycle: created/prompted", () => {
     await handleAgentSessionCreated(ctx, mockTokenManager(), {
       dataDir: dir,
       createActivity: mockCreateActivity,
+      chatRunner: async () => ({ mode: "fetch", reply: "" }),
       museRunner: async () => ({
         status: "blocked",
         summary: "Choose a repository",
@@ -360,6 +367,7 @@ describe("lifecycle: created/prompted", () => {
       dataDir: dir,
       runner: runCommand,
       createActivity: mockCreateActivity,
+      chatRunner: async () => ({ mode: "fetch", reply: "" }),
       museRunner: mockMuse,
     });
 
@@ -368,7 +376,7 @@ describe("lifecycle: created/prompted", () => {
     assert.ok(after.followUps[0].includes("clarification"));
     // After resume, status may be completed or failed depending on git diff, but not awaiting_input
     assert.ok(["running", "completed", "failed"].includes(after.status));
-    assert.ok(activities.some((a) => a.content.body?.includes("resuming") || a.content.body?.includes("Received follow-up")));
+    assert.ok(activities.some((a) => a.content.body?.includes("Reading")));
   });
 
   it("prompted when running queues follow-up without duplicating", async () => {
@@ -403,6 +411,7 @@ describe("lifecycle: created/prompted", () => {
     await handleAgentSessionPrompted(payload, mockTokenManager(), {
       dataDir: dir,
       createActivity: mockCreateActivity,
+      chatRunner: async () => ({ mode: "fetch", reply: "" }),
       museRunner: async () => ({
         status: "completed",
         summary: "you're welcome",
@@ -443,7 +452,7 @@ describe("lifecycle: created/prompted", () => {
     await handleAgentSessionPrompted(
       { agentSession: { id: "chain-1" }, agentActivity: { body: "do first thing" } },
       mockTokenManager(),
-      { dataDir: dir, createActivity: mockCreateActivity, museRunner: chainingMuse },
+      { dataDir: dir, createActivity: mockCreateActivity, chatRunner: async () => ({ mode: "fetch", reply: "" }), museRunner: chainingMuse },
     );
 
     assert.equal(museCalls, 2);
@@ -476,7 +485,7 @@ describe("lifecycle: created/prompted", () => {
     await handleAgentSessionPrompted(
       { agentSession: { id: "chain-cap-1" }, agentActivity: { body: "start" } },
       mockTokenManager(),
-      { dataDir: dir, createActivity: mockCreateActivity, museRunner: endlessMuse },
+      { dataDir: dir, createActivity: mockCreateActivity, chatRunner: async () => ({ mode: "fetch", reply: "" }), museRunner: endlessMuse },
     );
 
     assert.equal(museCalls, 10);
@@ -501,6 +510,7 @@ describe("lifecycle: created/prompted", () => {
       {
         dataDir: dir,
         createActivity: mockCreateActivity,
+        chatRunner: async () => ({ mode: "fetch", reply: "" }),
         museRunner: async (opts) => {
           captured = opts;
           opts.onProgressLine(toolLine("proposed"));
@@ -530,6 +540,7 @@ describe("lifecycle: created/prompted", () => {
     await handleAgentSessionCreated(ctx, mockTokenManager(), {
       dataDir: dir,
       createActivity: mockCreateActivity,
+      chatRunner: async () => ({ mode: "fetch", reply: "" }),
       museRunner: async () => ({
         status: "completed",
         summary: "64",
@@ -565,6 +576,7 @@ describe("lifecycle: created/prompted", () => {
     await handleAgentSessionPrompted(payload, mockTokenManager(), {
       dataDir: dir,
       createActivity: mockCreateActivity,
+      chatRunner: async () => ({ mode: "fetch", reply: "" }),
       museRunner: async ({ prompt }) => {
         musePrompt = prompt;
         return { status: "completed", summary: "64", questions: [], changed_files: [], validation_performed: [], residual_risks: [] };
@@ -600,6 +612,7 @@ describe("lifecycle: created/prompted", () => {
       {
         dataDir: dir,
         createActivity: mockCreateActivity,
+        chatRunner: async () => ({ mode: "fetch", reply: "" }),
         museRunner: async () => { museCalls++; throw new Error("echo must not start a turn"); },
       },
     );
@@ -628,6 +641,7 @@ describe("lifecycle: created/prompted", () => {
       {
         dataDir: dir,
         createActivity: mockCreateActivity,
+        chatRunner: async () => ({ mode: "fetch", reply: "" }),
         museRunner: async () => ({
           status: "completed",
           summary: "did it",
@@ -665,6 +679,7 @@ describe("lifecycle: created/prompted", () => {
         dataDir: dir,
         createActivity: mockCreateActivity,
         runner: gitMustNotRun,
+        chatRunner: async () => ({ mode: "fetch", reply: "" }),
         museRunner: async () => ({
           status: "completed",
           summary: "Nothing has started yet — tell me the task.",
@@ -701,6 +716,7 @@ describe("lifecycle: created/prompted", () => {
       {
         dataDir: dir,
         createActivity: mockCreateActivity,
+        chatRunner: async () => ({ mode: "fetch", reply: "" }),
         museRunner: async () => ({
           status: "completed",
           summary: "Because nothing was asked yet.",
@@ -732,6 +748,7 @@ describe("lifecycle: created/prompted", () => {
       dataDir: dir,
       createActivity: mockCreateActivity,
       runner: gitMustNotRun,
+      chatRunner: async () => ({ mode: "fetch", reply: "" }),
       museRunner: async () => ({
         status: "completed",
         summary: "Hey! What do you want to work on?",
@@ -770,7 +787,7 @@ describe("lifecycle: created/prompted", () => {
     await handleAgentSessionPrompted(
       { agentSession: { id: "empty-echo-1" }, agentActivity: {} },
       mockTokenManager(),
-      { dataDir: dir, createActivity: mockCreateActivity, runner: mustNotRun, museRunner: mustNotRun },
+      { dataDir: dir, createActivity: mockCreateActivity, runner: mustNotRun, chatRunner: async () => ({ mode: "fetch", reply: "" }), museRunner: mustNotRun },
     );
 
     const after = store.load("empty-echo-1");
@@ -798,6 +815,7 @@ describe("lifecycle: created/prompted", () => {
         dataDir: dir,
         createActivity: mockCreateActivity,
         runner: gitMustNotRun,
+        chatRunner: async () => ({ mode: "fetch", reply: "" }),
         museRunner: async () => ({
           status: "completed",
           summary: "Hey there.",

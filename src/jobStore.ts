@@ -1,4 +1,4 @@
-import { mkdirSync, readFileSync, writeFileSync, existsSync, chmodSync, readdirSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync, existsSync, chmodSync, readdirSync, statSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { atomicWriteJson } from "./fsAtomic.js";
 import { sanitizeError as centralSanitizeError } from "./commandRunner.js";
@@ -289,4 +289,47 @@ export class JobStore {
       if (k.startsWith(`${this.dataDir}::repo::`)) globalRepoLocks.delete(k);
     }
   }
+}
+
+/**
+ * Delete job files, scratch dirs, and worktree dirs older than maxAgeDays
+ * (by mtime). Active sessions keep touching their job file, so only idle
+ * history is removed. Tokens and OAuth state are never touched.
+ */
+export function pruneOldData(dataDir: string, maxAgeDays = 30, nowMs = Date.now()): { jobs: number; scratch: number; worktrees: number } {
+  const removed = { jobs: 0, scratch: 0, worktrees: 0 };
+  const cutoff = nowMs - maxAgeDays * 24 * 60 * 60 * 1000;
+  const pruneDir = (sub: "jobs" | "scratch" | "worktrees", onlyJson: boolean): void => {
+    const dir = join(dataDir, sub);
+    if (!existsSync(dir)) return;
+    let entries: string[];
+    try {
+      entries = readdirSync(dir);
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      if (onlyJson && !entry.endsWith(".json")) continue;
+      if (entry.startsWith(".")) continue;
+      const full = join(dir, entry);
+      let mtime = 0;
+      try {
+        mtime = statSync(full).mtimeMs;
+      } catch {
+        continue;
+      }
+      if (mtime >= cutoff) continue;
+      try {
+        rmSync(full, { recursive: true, force: true });
+        removed[sub]++;
+      } catch {}
+    }
+  };
+  pruneDir("jobs", true);
+  pruneDir("scratch", false);
+  pruneDir("worktrees", false);
+  if (removed.jobs + removed.scratch + removed.worktrees > 0) {
+    console.log(JSON.stringify({ msg: "pruned old ghost data", ...removed, maxAgeDays }));
+  }
+  return removed;
 }

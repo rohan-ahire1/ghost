@@ -1,13 +1,12 @@
 import { createAgentActivity } from "./linear.js";
 import type { LinearTokenManager } from "./linear.js";
 import { JobStore, type JobRecord } from "./jobStore.js";
-import { resolveRepository, buildBranchName } from "./repoResolver.js";
 import { runMuse, parseMuseJsonl } from "./museRunner.js";
-import { extractDirective, isQuickQuestion } from "./intent.js";
+import { runChatGate } from "./chat.js";
 import { runCommand, sanitizeError } from "./commandRunner.js";
 import type { GhostJobContext, PipelineDeps } from "./sessionTypes.js";
 import { postActivity, sendElicitation } from "./activities.js";
-import { runScratchPipeline, runRepoPipeline, cleanupWorktreeAndBranch, getDataDir, getWorktreesDir } from "./pipeline.js";
+import { runTicketPipeline, cleanupWorktreeAndBranch, ensureScratchWorkspace, getDataDir } from "./pipeline.js";
 import { drainPendingTurns, extractPromptBody } from "./resume.js";
 
 // Compat re-exports for the pre-split module layout.
@@ -113,6 +112,55 @@ export function extractGhostContext(payload: any): GhostJobContext | null {
 }
 
 /**
+ * Extract the user's actual triggering message from a webhook payload and/or
+ * promptContext. Linear always delivers the FULL issue body as promptContext;
+ * the user's message arrives as `initialPrompt` or in the mentioning comment.
+ * Returns undefined when nothing directive-like is found.
+ */
+export function extractDirective(rawPayload: any, promptContext?: string): string | undefined {
+  const candidates: unknown[] = [
+    rawPayload?.agentSession?.comment?.body,
+    rawPayload?.data?.agentSession?.comment?.body,
+    rawPayload?.comment?.body,
+    rawPayload?.data?.comment?.body,
+    rawPayload?.agentActivity?.body,
+    rawPayload?.data?.agentActivity?.body,
+    rawPayload?.prompt,
+    rawPayload?.data?.prompt,
+    rawPayload?.text,
+    rawPayload?.data?.text,
+  ];
+  for (const c of candidates) {
+    const cleaned = cleanDirective(typeof c === "string" ? c : undefined);
+    if (cleaned) return cleaned;
+  }
+  if (typeof promptContext === "string") {
+    // Linear embeds the mentioning comment first:
+    // <primary-directive-thread><comment ...>TEXT</comment>...
+    const m = promptContext.match(/<primary-directive-thread[^>]*>[\s\S]*?<comment[^>]*>([\s\S]*?)<\/comment>/i);
+    const cleaned = cleanDirective(m?.[1]);
+    if (cleaned) return cleaned;
+  }
+  return undefined;
+}
+
+function cleanDirective(raw: string | undefined): string | undefined {
+  if (!raw) return undefined;
+  const text = raw
+    // Strip Linear mention tags like <user id="...">ghost</user>
+    .replace(/<user[^>]*>[\s\S]*?<\/user>/gi, " ")
+    // Strip any other XML-ish framing tags but keep inner text
+    .replace(/<\/?(comment|primary-directive-thread|other-thread|issue|title|description|team|project|issue-relations|issue-ref|blocking|related)[^>]*>/gi, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (text.length < 2) return undefined;
+  // A bare "@ghost" mention with nothing else carries no directive
+  if (/^@?ghost$/i.test(text)) return undefined;
+  if (text.length > 2000) return text.slice(0, 2000);
+  return text;
+}
+
+/**
  * Greeting sessions stay open for a follow-up. The fallback recognizes the
  * short-lived records written by the previous release so they do not keep
  * replaying a terminal `already completed` response forever.
@@ -134,6 +182,7 @@ export async function handleAgentSessionCreated(
   const fetchFn = deps.fetchFn || fetch;
   const createActivityFn = deps.createActivity || createAgentActivity;
   const museRunner = deps.museRunner || runMuse;
+  const chatRunner = deps.chatRunner || runChatGate;
 
   console.log(
     JSON.stringify({
@@ -145,7 +194,6 @@ export async function handleAgentSessionCreated(
   );
 
   const jobStore = new JobStore(dataDir);
-  const worktreesDir = getWorktreesDir(dataDir);
 
   // Per-session lock for duplicate check & creation
   let isDuplicate = false;
@@ -194,7 +242,7 @@ export async function handleAgentSessionCreated(
     }
     const dupJob = jobStore.load(ctx.agentSessionId);
     if (dupText.trim() && dupJob && (dupJob.status === "awaiting_input" || dupJob.status === "completed")) {
-      await drainPendingTurns({ agentSessionId: ctx.agentSessionId, dataDir, jobStore, tokenManager, runner, fetchFn, createActivityFn, museRunner });
+      await drainPendingTurns({ agentSessionId: ctx.agentSessionId, dataDir, jobStore, tokenManager, runner, fetchFn, createActivityFn, museRunner, chatRunner });
       return;
     }
     // Truthful response without duplicating execution
@@ -239,21 +287,6 @@ export async function handleAgentSessionCreated(
     console.log(JSON.stringify({ msg: "created without user text, awaiting instruction", sessionId: ctx.agentSessionId }));
     return;
   }
-
-  // Phase 1: immediate ack within 10s
-  try {
-    const ackBody = ctx.issueIdentifier
-      ? `👋 Ghost received **${ctx.issueIdentifier}**${ctx.issueTitle ? ` — "${ctx.issueTitle}"` : ""} and is working on it…`
-      : "👋 Ghost received your message and is working on it…";
-    const ackDetail =
-      `_promptContext ${ctx.promptContext ? `${ctx.promptContext.length} chars` : "present"} · session \`${ctx.agentSessionId}\`_\n` +
-      `I'll post the result here when the work finishes.`;
-    const ackOk = await postActivity(tokenManager, ctx.agentSessionId, { type: "thought", body: `${ackBody}\n\n${ackDetail}` }, createActivityFn);
-    if (ackOk) console.log(JSON.stringify({ msg: "Ghost ack (working) sent", agentSessionId: ctx.agentSessionId }));
-  } catch (err) {
-    console.error(JSON.stringify({ msg: "Ghost ack error", agentSessionId: ctx.agentSessionId, error: sanitizeError((err as Error).message, 300) }));
-  }
-
   // Mark running
   await jobStore.withSessionLock(ctx.agentSessionId, async () => {
     const rec = jobStore.load(ctx.agentSessionId);
@@ -263,128 +296,78 @@ export async function handleAgentSessionCreated(
     }
   });
 
-  // Step: Resolve repository. Zero or multiple matches are NOT a failure and
-  // never stop the request before Muse: the request still runs exactly once in
-  // a private per-session scratch workspace with candidate information in the
-  // Muse prompt. Muse answers directly when no change is needed, or returns
-  // blocked asking for the target repository when edits are required. Only a
-  // single resolved repo continues in an isolated git worktree.
-  let repoResult: ReturnType<typeof resolveRepository> | null = null;
-  try {
-    repoResult = resolveRepository({
-      issueIdentifier: ctx.issueIdentifier,
-      issueTitle: ctx.issueTitle,
-      promptContext: ctx.promptContext,
-      rawPayload: ctx.rawPayload,
-    });
-  } catch (err) {
-    const msg = sanitizeError((err as Error).message, 400);
-    console.error(JSON.stringify({ msg: "repo resolver error", error: msg }));
-    await jobStore.withSessionLock(ctx.agentSessionId, async () => {
-      const rec = jobStore.load(ctx.agentSessionId);
-      if (rec) {
-        rec.status = "failed";
-        rec.error = msg.slice(0, 500);
-        jobStore.save(rec);
-      }
-    });
-    await postActivity(tokenManager, ctx.agentSessionId, { type: "error", body: `Ghost failed to resolve repository: ${msg}` }, createActivityFn);
-    return;
-  }
-
-  const quickQuestion = isQuickQuestion(directive);
-
-  if (!repoResult.repo || quickQuestion) {
-    // Zero or multiple matches — run in a private per-session scratch
-    // workspace so every request still reaches Muse exactly once. Candidate
-    // information goes into the Muse prompt (e.g. cross-repo summaries work);
-    // when edits genuinely need a repository, Muse returns blocked asking for
-    // the target repo, which then sends the Linear elicitation. Never fail or
-    // elicit early here.
-    const candidates = quickQuestion && repoResult.repo
-      ? [repoResult.repo.id]
-      : repoResult.candidates.map((c) => c.id);
-    const resolutionKind = quickQuestion
-      ? "quick question"
-      : candidates.length > 1 ? "multiple repos matched" : "no repo matched";
-    console.log(JSON.stringify({ msg: `${resolutionKind}, using scratch workspace`, reason: repoResult.reason, candidates, sessionId: ctx.agentSessionId }));
-    await jobStore.withSessionLock(ctx.agentSessionId, async () => {
-      const rec = jobStore.load(ctx.agentSessionId);
-      if (rec) {
-        rec.workspaceKind = "scratch";
-        jobStore.save(rec);
-      }
-    });
-    const scratchNote = quickQuestion
-      ? "💬 Quick question — answering directly with no worktree (nothing to commit)"
-      : candidates.length > 1
-        ? `🔍 Multiple repositories matched (${candidates.join(", ")}) — working in a private scratch workspace so the request still gets answered (no commits will be made)`
-        : `🔍 No repository matched — working in a private scratch workspace (no commits will be made)`;
-    await postActivity(tokenManager, ctx.agentSessionId, { type: "thought", body: scratchNote }, createActivityFn);
-    try {
-      await runScratchPipeline({
-        ctx,
-        dataDir,
-        jobStore,
-        tokenManager,
-        createActivityFn,
-        museRunner,
-        repoResolution: { candidates, reason: quickQuestion ? "quick question, no worktree needed" : repoResult.reason },
-        directive,
-      });
-    } catch (err) {
-      const safe = sanitizeError((err as Error).message, 600);
-      console.error(JSON.stringify({ msg: "scratch pipeline error", sessionId: ctx.agentSessionId, error: safe }));
-      await jobStore.withSessionLock(ctx.agentSessionId, async () => {
-        const rec = jobStore.load(ctx.agentSessionId);
-        if (rec && rec.status !== "completed" && rec.status !== "awaiting_input") {
-          rec.status = "failed";
-          rec.error = safe.slice(0, 800);
-          jobStore.save(rec);
-        }
-      });
-      await postActivity(tokenManager, ctx.agentSessionId, { type: "error", body: `Ghost encountered an error: ${safe}` }, createActivityFn);
-    }
-    // Messages that arrived mid-turn chain behind it in the same session.
-    await drainPendingTurns({ agentSessionId: ctx.agentSessionId, dataDir, jobStore, tokenManager, runner, fetchFn, createActivityFn, museRunner });
-    return;
-  }
-
-  const repo = repoResult.repo;
-  const branch = buildBranchName(ctx.issueIdentifier, ctx.agentSessionId);
-
-  console.log(JSON.stringify({ msg: "repo resolved", repo: repo.id, branch, sessionId: ctx.agentSessionId }));
-
-  // Persist repo/branch
+  // Chat gate first: the model sees ONLY the message and the ticket id —
+  // never the ticket body. Small talk answers here with no worktree and no
+  // announcement; anything needing the ticket continues to the ticket stage.
+  const scratchPath = ensureScratchWorkspace(dataDir, ctx.agentSessionId);
   await jobStore.withSessionLock(ctx.agentSessionId, async () => {
     const rec = jobStore.load(ctx.agentSessionId);
     if (rec) {
-      rec.repo = { id: repo.id, path: repo.path, github: repo.github };
-      rec.branch = branch;
-      rec.workspaceKind = "repo";
+      rec.scratchPath = scratchPath;
+      rec.workspaceKind = "scratch";
       jobStore.save(rec);
     }
   });
 
-  await postActivity(tokenManager, ctx.agentSessionId, { type: "thought", body: `🔍 Resolved repository **${repo.id}** (\`${repo.github}\`) · branch \`${branch}\`` }, createActivityFn);
-
-  // No pipeline-wide lock: sessions on the same repo run concurrently in
-  // isolated worktrees. Only shared-checkout git ops (setup/cleanup inside
-  // runRepoPipeline) take the per-repo lock.
+  let gate: { mode: "chat" | "fetch"; reply: string };
   try {
-    await runRepoPipeline({
+    gate = await chatRunner({
+      workspace: scratchPath,
+      ticketId: ctx.issueIdentifier,
+      message: directive,
+      history: [],
+    });
+  } catch (err) {
+    const safe = sanitizeError((err as Error).message, 600);
+    console.error(JSON.stringify({ msg: "chat gate error", sessionId: ctx.agentSessionId, error: safe }));
+    await jobStore.withSessionLock(ctx.agentSessionId, async () => {
+      const rec = jobStore.load(ctx.agentSessionId);
+      if (rec) {
+        rec.status = "failed";
+        rec.error = safe.slice(0, 800);
+        jobStore.save(rec);
+      }
+    });
+    await postActivity(tokenManager, ctx.agentSessionId, { type: "error", body: `Ghost encountered an error: ${safe}` }, createActivityFn);
+    return;
+  }
+
+  if (gate.mode !== "fetch" && gate.reply.trim()) {
+    const reply = sanitizeError(gate.reply, 4000);
+    await jobStore.withSessionLock(ctx.agentSessionId, async () => {
+      const rec = jobStore.load(ctx.agentSessionId);
+      if (rec) {
+        rec.status = "completed";
+        rec.summary = reply;
+        jobStore.save(rec);
+      }
+    });
+    await postActivity(tokenManager, ctx.agentSessionId, { type: "response", body: reply }, createActivityFn);
+    console.log(JSON.stringify({ msg: "Ghost chat turn completed", sessionId: ctx.agentSessionId }));
+    await drainPendingTurns({ agentSessionId: ctx.agentSessionId, dataDir, jobStore, tokenManager, runner, fetchFn, createActivityFn, museRunner, chatRunner });
+    return;
+  }
+
+  // Fetch path: the message needs the ticket. One short status line, then the
+  // ticket stage (answer from the ticket, or repo work when the model says so).
+  await postActivity(
+    tokenManager,
+    ctx.agentSessionId,
+    { type: "thought", body: ctx.issueIdentifier ? `📖 Reading **${ctx.issueIdentifier}**…` : "📖 Reading the ticket…" },
+    createActivityFn,
+  );
+  try {
+    await runTicketPipeline({
       ctx,
-      repo,
-      branch,
       dataDir,
-      worktreesDir,
       jobStore,
       tokenManager,
       runner,
       fetchFn,
       createActivityFn,
       museRunner,
-      directive,
+      scratchPath,
+      message: directive,
     });
   } catch (err) {
     const safe = sanitizeError((err as Error).message, 600);
@@ -401,13 +384,13 @@ export async function handleAgentSessionCreated(
     // Best-effort cleanup on terminal failed — try to clean isolated worktree if it was created
     try {
       const rec = jobStore.load(ctx.agentSessionId);
-      if (rec?.worktreePath && rec.status === "failed") {
-        await cleanupWorktreeAndBranch({ dataDir, worktreePath: rec.worktreePath, targetRepoPath: repo.path, branch, runner, jobStore, repoId: repo.id });
+      if (rec?.worktreePath && rec.status === "failed" && rec.repo) {
+        await cleanupWorktreeAndBranch({ dataDir, worktreePath: rec.worktreePath, targetRepoPath: rec.repo.path, branch: rec.branch, runner, jobStore, repoId: rec.repo.id });
       }
     } catch {}
   }
   // Messages that arrived mid-turn chain behind it in the same session.
-  await drainPendingTurns({ agentSessionId: ctx.agentSessionId, dataDir, jobStore, tokenManager, runner, fetchFn, createActivityFn, museRunner });
+  await drainPendingTurns({ agentSessionId: ctx.agentSessionId, dataDir, jobStore, tokenManager, runner, fetchFn, createActivityFn, museRunner, chatRunner });
 }
 
 export async function handleAgentSessionPrompted(
@@ -440,6 +423,7 @@ export async function handleAgentSessionPrompted(
   const fetchFn = deps.fetchFn || fetch;
   const createActivityFn = deps.createActivity || createAgentActivity;
   const museRunner = deps.museRunner || runMuse;
+  const chatRunner = deps.chatRunner || runChatGate;
 
   const jobStore = new JobStore(dataDir);
   const job = jobStore.load(agentSessionId);
@@ -497,7 +481,7 @@ export async function handleAgentSessionPrompted(
   if (job.status === "awaiting_input" || job.status === "completed") {
     // A new message in the same chat starts a new turn — including after a
     // previous turn completed. Queued messages chain via drainPendingTurns.
-    await drainPendingTurns({ agentSessionId, dataDir, jobStore, tokenManager, runner, fetchFn, createActivityFn, museRunner });
+    await drainPendingTurns({ agentSessionId, dataDir, jobStore, tokenManager, runner, fetchFn, createActivityFn, museRunner, chatRunner });
     return;
   }
 

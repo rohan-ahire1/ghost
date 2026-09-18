@@ -1,6 +1,7 @@
 import type { runCommand } from "./commandRunner.js";
 import type { createAgentActivity } from "./linear.js";
 import type { runMuse } from "./museRunner.js";
+import type { runChatGate } from "./chat.js";
 
 export interface GhostJobContext {
   agentSessionId: string;
@@ -23,4 +24,5 @@ export interface PipelineDeps {
   fetchFn?: typeof fetch;
   createActivity?: typeof createAgentActivity;
   museRunner?: typeof runMuse;
+  chatRunner?: typeof runChatGate;
 }

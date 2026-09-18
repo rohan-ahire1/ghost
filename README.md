@@ -14,23 +14,28 @@ Lightweight Node.js/TypeScript service that handles Linear webhooks and `AgentSe
 
 ## AgentSession Pipeline (Production)
 
+Every turn runs the same three stages. No word lists, no hardcoded intents —
+the model decides, and fails closed toward plain chat.
+
 `AgentSessionEvent action=created`:
 1. Returns 200 immediately (no model/git work in HTTP path via `setImmediate`).
 2. Logs safe metadata only (no prompt/token dump).
-3. Validates Linear token, posts immediate `thought` ack (`👋 Ghost received…`).
-4. The user's message is the instruction — the attached issue history is background, never orders. A session created with no user text stays open and asks what to do instead of dispatching the issue. Otherwise Ghost resolves a repository in priority order: exact Linear label match → `GHOST_PROJECT_MAP` (Linear project name/id → repo) → alias substring in title/prompt → `GHOST_DEFAULT_REPO` fallback. One match uses an isolated repo worktree; zero or multiple matches use private scratch so the request still reaches Muse. Muse asks for a repo only when the requested work actually requires one.
-5. Persists durable job under `GHOST_DATA_DIR/jobs/<session>.json` (0700/0600, atomic writes) with states `created/running/awaiting_input/completed/failed`. Duplicate `created` deliveries (including after restart) are idempotent. Sessions on the same repo run concurrently in isolated worktrees; only short shared-checkout git setup/cleanup holds the per-repo lock.
-6. If a repository resolved: fetches `origin/main` (without touching dirty checkout) and creates isolated worktree under `GHOST_DATA_DIR/worktrees/<session>` on a branch that includes both the sanitized issue identifier and session ID. This makes independent sessions on one ticket collision-free. Existing remote branch is refused unless it belongs to the same job. Never modifies or cleans the original checkout; never force-pushes. If no repository resolved — or the triggering message is a short question with no code-change request: creates a private per-session scratch workspace under `GHOST_DATA_DIR/scratch/<session>` (0700) — read/summary/general requests still work, and scratch never enters git/PR operations.
-7. Runs one direct Muse invocation per substantive request via: `/home/rohan/.local/bin/muse exec --json --workspace <dir> --prompt-file <file> --provider meta --model muse-spark-1.3-contributor --reasoning-effort high --parallel-tool-calls --trust-workspace --no-foreign-personal-context --approval-mode never --no-session-log --approval-judge off --max-model-steps 50` with the full ticket in the prompt file. `--user-input-auto-resolve` is deliberately omitted because Muse requires session logging for that mode, while Ghost keeps session logging disabled. Muse may answer without editing files, edit files, or return blocked with concise questions. No Sol model, orchestrator skill, intent classifier, or sandbox flags.
-8. Parses Muse JSONL defensively (multiple event shapes) against the small result shape (`status` completed/blocked, `summary`, `questions`, `changed_files`, `validation_performed`, `residual_risks`). If Muse answers in prose without the JSON object, Ghost posts the raw reply marked as degraded instead of failing with nothing to show. Repo prompts lead with the user's triggering message and the one-place worktree convention (base dir, branch shape, never touch the main checkout) so the model can create a further worktree itself when asked.
-9. If Muse `blocked` → persist `awaiting_input`, send Linear `elicitation` with questions, stop before commit. In scratch with no repository, a task needing repo changes is answered as blocked asking which repository.
-10. If the workspace is a repository worktree and files actually changed, Ghost validates worktree deterministically via existing `package.json` scripts in order `test → typecheck → lint → build` (only scripts that exist; missing `test` is not failure but recorded). Any selected check failure → fail before commit. No task-provided commands are executed. If no files changed, Muse's summary is posted directly as the Linear response and the job completes — no commit, push, PR, or validation required.
-11. Requires non-empty git diff; rejects secret/private-file additions (`.env`, `credentials`, `*.pem/*.key/*.p12/*.pfx`, `id_rsa`, `tokens.json`, ghost data). Commits with sanitized `issue — title` message, pushes via SSH (no `--force`), records SHA.
-12. Creates PR via GitHub REST API if `GITHUB_TOKEN` or `GH_TOKEN` is present (without logging token); treats existing open PR for branch as success. Without token, returns truthful compare URL `https://github.com/<owner>/<repo>/compare/main...<url-encoded-branch>?expand=1` and does not claim a PR was created.
-13. Posts Linear `thought`/`action` updates at major phases; final `response` includes concise summary (plus branch, checks, and PR or compare URL when code was published). Failures persist `failed` with sanitized error and post `error` activity. Never logs prompts, tokens, env values, or full model/command output.
+3. The user's message is the instruction — the attached issue history is background, never orders. A session created with no user text stays open and asks what to do instead of dispatching the issue.
+4. Persists durable job under `GHOST_DATA_DIR/jobs/<session>.json` (0700/0600, atomic writes) with states `created/running/awaiting_input/completed/failed`. Duplicate `created` deliveries (including after restart) are idempotent.
+5. **Chat gate:** one cheap model call sees ONLY the message, the ticket id, and recent turns — never the ticket body. Small talk answers here as a bare reply (no announcement, no worktree). Anything needing the ticket continues; anything unparseable stays chat.
+6. **Ticket stage:** one model call with the full ticket in per-session scratch. Read-only questions are answered directly; `blocked` with missing info sends an `elicitation`; `wants_work` continues to the work stage.
+7. **Work stage (only when the model asks for it):** resolves a repository in priority order: exact Linear label match → `GHOST_PROJECT_MAP` (Linear project name/id → repo) → alias substring in title/prompt → session's known repo (follow-ups) → ask the user. No repo is ever assumed: ambiguity sends an `elicitation` naming the candidates.
+8. Work stage setup: fetches `origin/main` (without touching dirty checkout) and creates an isolated worktree under `GHOST_DATA_DIR/worktrees/<session>` (0700) on a branch with the sanitized issue identifier and session ID, so independent sessions on one ticket stay collision-free. A follow-up turn reuses its own pushed branch instead of failing. Never modifies or cleans the original checkout; never force-pushes.
+9. Model calls are staged, each via `muse exec --json` (`meta` / `muse-spark-1.3-contributor`, `--trust-workspace --approval-mode never --no-session-log`, no sandbox flags): chat gate (low reasoning, 15 steps, message + ticket id only), ticket call (full ticket in scratch), work call (high reasoning, 50 steps, in the worktree). At most `GHOST_MAX_CONCURRENT_MUSE` (default 2) run at once across sessions.
+10. Parses Muse JSONL defensively (multiple event shapes) against the small result shape (`status` completed/blocked, `summary`, `questions`, `changed_files`, `validation_performed`, `residual_risks`, `wants_work`). If Muse answers in prose without the JSON object, Ghost posts the raw reply marked as degraded instead of failing with nothing to show. Repo prompts lead with the user's triggering message and the one-place worktree convention (base dir, branch shape, never touch the main checkout).
+11. If Muse `blocked` → persist `awaiting_input`, send Linear `elicitation` with questions, stop before commit.
+12. If the workspace is a repository worktree and files actually changed, Ghost validates worktree deterministically via existing `package.json` scripts in order `test → typecheck → lint → build` (only scripts that exist; missing `test` is not failure but recorded). Any selected check failure → fail before commit. No task-provided commands are executed. If no files changed, Muse's summary is posted directly as the Linear response and the job completes — no commit, push, PR, or validation required.
+13. Requires non-empty git diff; rejects secret/private-file additions (`.env`, `credentials`, `*.pem/*.key/*.p12/*.pfx`, `id_rsa`, `tokens.json`, ghost data). Commits with sanitized `issue — title` message, pushes via SSH (no `--force`), records SHA.
+14. Creates PR via GitHub REST API if `GITHUB_TOKEN` or `GH_TOKEN` is present (without logging token); treats existing open PR for branch as success. Without token, returns truthful compare URL `https://github.com/<owner>/<repo>/compare/main...<url-encoded-branch>?expand=1` and does not claim a PR was created.
+15. Posts short `thought` updates at major phases (capped progress feed); final `response` includes concise summary (plus branch, checks, and PR or compare URL when code was published). Failures persist `failed` with sanitized error and post `error` activity. Never logs prompts, tokens, env values, or full model/command output.
 
 `action=prompted` (follow-up):
-- Appends follow-up (truncated) to job and resumes same job if `awaiting_input`; queues if `running`; responds truthfully if `completed`/`failed` without duplicating execution.
+- Appends follow-up (truncated) to the same chat and runs the same three stages when the job is `awaiting_input` or `completed`; queues if `running`; responds truthfully if `failed` without duplicating execution. Follow-ups reuse the session's known repo when they name none.
 
 All process spawning uses `argv` arrays with `shell:false`, timeouts, output caps, and sanitized errors. Never interpolates task text into a shell command.
 
@@ -46,8 +51,9 @@ GHOST_HOST=127.0.0.1
 GHOST_DATA_DIR=/home/rohan/.config/ghost
 # Optional:
 GITHUB_TOKEN or GH_TOKEN            # create PR via REST API; otherwise compare URL
-GHOST_DEFAULT_REPO=scoutline        # fallback when resolver finds 0 matches (one of: scoutline, flaggo, portfolio, coachmate)
+GHOST_DEFAULT_REPO=                 # leave unset: no repo is ever assumed; ambiguity asks the user
 GHOST_PROJECT_MAP={"Scoutline app":"scoutline"}  # Linear project name/id -> repo id (case-insensitive)
+GHOST_MAX_CONCURRENT_MUSE=2         # cap on parallel model runs across sessions (1-8)
 GHOST_REPO_SCOUTLINE_PATH=/home/rohan/projects/scoutline   # per-repo path overrides (similar for FLAGGO, PORTFOLIO, COACHMATE)
 GHOST_REPO_MAP={"scoutline":"/path"}              # generic JSON map override
 GHOST_MUSE_BIN=/home/rohan/.local/bin/muse
@@ -75,7 +81,7 @@ All repos use `origin/main` over SSH.
 - Worktrees are always based on a freshly fetched `origin/main`; the dirty user checkout is never modified or cleaned.
 - Branch reuse is refused if remote branch already exists for a different job; push is never forced.
 - Muse's structured output is load-bearing: Ghost defensively parses Muse JSONL (`muse-output-schema.json` documents the shape); no single event shape is assumed.
-- Follow-ups resume only when the job is `awaiting_input`; otherwise they are queued or reported truthfully.
+- Follow-ups run a new turn when the job is `awaiting_input` or `completed`; they queue while `running` and report truthfully when `failed`.
 - If `GITHUB_TOKEN` is absent, Ghost pushes the branch and returns the compare link — it never claims a PR was created.
 - **Worktree lifecycle & retention:** Isolated worktrees live under `GHOST_DATA_DIR/worktrees/<session>` (0700). Ghost performs best-effort cleanup of the exact verified isolated path via `git worktree remove --force` **only** for terminal `completed` and `failed` outcomes, validated to be strictly inside `GHOST_DATA_DIR/worktrees` (no traversal, no sibling, not the target checkout). `awaiting_input` is **never** cleaned because the job may resume. After worktree removal, the session's local `ghost/*` branch is pruned when it has no commits ahead of `origin/main` or its tip already equals the pushed remote (unique work is never deleted). Cleanup logs safe metadata only (`worktreePath`, exitCode) and failure does not alter the truthful terminal result; the target checkout is never touched/cleaned/reset.
 
@@ -99,7 +105,7 @@ npm test          # builds then runs Node test runner (repoResolver, jobStore, b
 npm run build     # TypeScript strict, Node 18+
 ```
 
-Coverage highlights: repo resolution boundaries, scratch fallback for zero/multiple matches, durable/idempotent state with atomic writes & restart, safe branch naming, `shell:false` argv spawning with timeouts/caps, Muse CLI invocation shape, structured-result parsing, deterministic check selection, secret-path rejection, PR vs compare URL, `created` vs `prompted` lifecycle (duplicate suppression, awaiting_input resume).
+Coverage highlights: chat gate (message + ticket id only, fail-closed parsing), ticket flow (answer vs `wants_work` vs elicitation), repo resolution boundaries, durable/idempotent state with atomic writes & restart, safe branch naming, `shell:false` argv spawning with timeouts/caps, Muse CLI invocation shape, structured-result parsing, deterministic check selection, secret-path rejection, PR vs compare URL, `created` vs `prompted` lifecycle (duplicate suppression, awaiting_input resume), concurrency cap, retention pruning.
 
 ## Deployability
 
@@ -124,9 +130,11 @@ curl -s 127.0.0.1:8791/jobs/<session-id>         # one job's detail
 sudo journalctl -u ghost --since '1 hour ago'    # live logs
 ```
 
-Set `GHOST_DEFAULT_REPO` (e.g. `scoutline`) in the systemd unit as a routing
-safety net, and `GHOST_PROJECT_MAP` (`{"Linear project name":"repo-id"}`) so
-tickets route by Linear project without needing the repo name in the title.
+Set `GHOST_PROJECT_MAP` (`{"Linear project name":"repo-id"}`) in the systemd
+unit so tickets route by Linear project without needing the repo name in the
+title. Keep `GHOST_DEFAULT_REPO` unset: Ghost asks the user rather than
+assuming a repo. Job/scratch/worktree history older than 30 days is pruned
+automatically on every boot.
 
 ## Environment Isolation (Child Processes)
 

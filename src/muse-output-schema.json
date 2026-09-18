@@ -42,6 +42,9 @@
       "items": {
         "type": "string"
       }
+    },
+    "wants_work": {
+      "type": "boolean"
     }
   },
   "additionalProperties": false

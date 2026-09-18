@@ -18,6 +18,7 @@ export function sanitizeModelResult(muse: MuseResult): MuseResult {
     changed_files: sanitizeModelArray(muse.changed_files, 500, 100),
     validation_performed: sanitizeModelArray(muse.validation_performed, 500, 20),
     residual_risks: sanitizeModelArray(muse.residual_risks, 1000, 20),
+    wants_work: muse.wants_work === true,
   };
 }
 export async function postActivity(

@@ -1,6 +1,7 @@
 import { mkdtempSync, writeFileSync, chmodSync, rmSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
+import { fileURLToPath } from "node:url";
 import { runCommand } from "./commandRunner.js";
 import { sanitizeError } from "./commandRunner.js";
 import { buildMuseEnv } from "./childEnv.js";
@@ -26,6 +27,15 @@ export const MUSE_MAX_MODEL_STEPS = "50";
 // and full latitude either way.
 export const MUSE_QUICK_REASONING_EFFORT = "low";
 export const MUSE_QUICK_MAX_MODEL_STEPS = "15";
+// The chat gate only classifies message+ticket-id with no tools, so it runs
+// at the lowest reasoning setting with a tight step cap for fast replies.
+export const MUSE_GATE_REASONING_EFFORT = "minimal";
+export const MUSE_GATE_MAX_MODEL_STEPS = "5";
+
+/** Absolute path of a static asset shipped in dist/ (e.g. output schemas). */
+export function distAsset(name: string): string {
+  return join(dirname(fileURLToPath(import.meta.url)), name);
+}
 
 export interface MuseResult {
   status: "completed" | "blocked";
@@ -52,6 +62,8 @@ export interface MuseRunOptions {
   reasoningEffort?: string;
   /** Called with each raw stdout line as it arrives (for live progress). */
   onProgressLine?: (line: string) => void;
+  /** Scratch runs have no repo and need no browsing. */
+  disableWebTools?: boolean;
 }
 
 /**
@@ -153,8 +165,12 @@ export function buildMuseArgs(params: {
   promptFile: string;
   maxModelSteps?: number;
   reasoningEffort?: string;
+  /** Static checked-in schema file shaping the final answer (meta only). */
+  outputSchema?: string;
+  /** Scratch-only runs have no repo and need no browsing. */
+  disableWebTools?: boolean;
 }): string[] {
-  return [
+  const args = [
     "exec",
     "--json",
     "--workspace",
@@ -178,6 +194,9 @@ export function buildMuseArgs(params: {
     "--max-model-steps",
     String(params.maxModelSteps ?? Number(MUSE_MAX_MODEL_STEPS)),
   ];
+  if (params.outputSchema) args.push("--output-schema", params.outputSchema);
+  if (params.disableWebTools) args.push("--disable-web-tools");
+  return args;
 }
 
 export function buildMusePrompt(params: {
@@ -247,6 +266,9 @@ export function buildMusePrompt(params: {
     }
     lines.push(
       "Read-only first: answer questions, summaries, and explanations directly from the ticket without editing files.",
+    );
+    lines.push(
+      "Use no tools — the ticket text below is everything you need, and this workspace holds no repository.",
     );
     lines.push(
       "If and only if the request needs code changes in a repository, do NOT edit scratch files — return completed with wants_work set to true and describe the work in summary. A coding session with the repository will run next.",
@@ -516,9 +538,12 @@ export async function runMuse(opts: MuseRunOptions): Promise<MuseResult> {
     promptFile,
     maxModelSteps: opts.maxModelSteps,
     reasoningEffort: opts.reasoningEffort,
+    outputSchema: distAsset("muse-output-schema.json"),
+    disableWebTools: opts.disableWebTools,
   });
 
   const timeoutMs = opts.timeoutMs ?? getMuseTimeoutMs();
+  const startedMs = Date.now();
 
   // Avoid logging prompt, tokens, env values — only safe metadata
   console.log(
@@ -573,6 +598,7 @@ export async function runMuse(opts: MuseRunOptions): Promise<MuseResult> {
       stdoutLength: result.stdout.length,
       stderrLength: result.stderr.length,
       truncated: result.truncated,
+      elapsedMs: Date.now() - startedMs,
     }),
   );
 

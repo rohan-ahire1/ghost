@@ -22,9 +22,21 @@ describe("direct Muse runner", () => {
     }
     assert.ok(!args.includes("--user-input-auto-resolve"), "must not combine auto-resolve with --no-session-log");
     const rendered = args.join(" ");
-    for (const forbidden of ["sandbox_read-only", "--yolo", "--disable-sandbox", "gpt-5.6-sol", "--strict-config", "--output-schema"]) {
+    for (const forbidden of ["sandbox_read-only", "--yolo", "--disable-sandbox", "gpt-5.6-sol", "--strict-config"]) {
       assert.ok(!rendered.includes(forbidden), `unexpected ${forbidden}`);
     }
+  });
+
+  it("attaches a static output schema and optional web-tool disable (no dynamic config)", () => {
+    // --output-schema was once banned alongside dynamic sandbox configs; it is
+    // now allowed only with a static checked-in schema file, which constrains
+    // the model's final answer instead of generating config.
+    const args = buildMuseArgs({ workspace: "/tmp/work", promptFile: "/tmp/prompt", outputSchema: "/tmp/schema.json", disableWebTools: true });
+    assert.equal(args[args.indexOf("--output-schema") + 1], "/tmp/schema.json");
+    assert.ok(args.includes("--disable-web-tools"));
+    const plain = buildMuseArgs({ workspace: "/tmp/work", promptFile: "/tmp/prompt" });
+    assert.ok(!plain.includes("--output-schema"));
+    assert.ok(!plain.includes("--disable-web-tools"));
   });
 
   it("defaults to high reasoning effort with full model steps", () => {

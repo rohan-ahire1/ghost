@@ -129,6 +129,7 @@ export async function invokeMuseOnce(opts: {
       prompt,
       reasoningEffort: quick ? MUSE_QUICK_REASONING_EFFORT : undefined,
       maxModelSteps: quick ? Number(MUSE_QUICK_MAX_MODEL_STEPS) : undefined,
+      disableWebTools: quick,
       onProgressLine: createProgressPoster(progress, (body: string) => {
         void postActivity(tokenManager, ctx.agentSessionId, { type: "thought", body: sanitizeError(body, 200) }, createActivityFn).then((ok) => {
           console.log(JSON.stringify({ msg: "progress thought posted", sessionId: ctx.agentSessionId, ok }));

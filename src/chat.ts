@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { runCommand } from "./commandRunner.js";
 import { buildMuseEnv } from "./childEnv.js";
-import { buildMuseArgs, getMuseBin, getMuseTimeoutMs, MUSE_QUICK_REASONING_EFFORT, MUSE_QUICK_MAX_MODEL_STEPS } from "./museRunner.js";
+import { buildMuseArgs, getMuseBin, getMuseTimeoutMs, distAsset, MUSE_GATE_REASONING_EFFORT, MUSE_GATE_MAX_MODEL_STEPS } from "./museRunner.js";
 import { museLimiter } from "./limiter.js";
 
 /**
@@ -47,6 +47,7 @@ export function buildChatPrompt(params: { ticketId?: string; message: string; hi
   lines.push(">>>");
   lines.push("");
   lines.push("Decide: is this small talk you can answer directly (greetings, thanks, general questions needing no ticket), or does it need the ticket details (work requests, questions about the ticket, follow-ups on earlier work)?");
+  lines.push("Use no tools — answer from the message alone, in one step.");
   lines.push('Output ONLY strict JSON: {"mode": "chat" | "fetch", "reply": string}.');
   lines.push('For "chat", put your full reply in "reply" (a sentence or two, natural tone). For "fetch", "reply" is "" — the ticket will be loaded next and you will see it then.');
   return lines.join("\n");
@@ -147,10 +148,13 @@ export async function runChatGate(opts: ChatRunOptions): Promise<ChatGate> {
   const args = buildMuseArgs({
     workspace: opts.workspace,
     promptFile,
-    maxModelSteps: Number(MUSE_QUICK_MAX_MODEL_STEPS),
-    reasoningEffort: MUSE_QUICK_REASONING_EFFORT,
+    maxModelSteps: Number(MUSE_GATE_MAX_MODEL_STEPS),
+    reasoningEffort: MUSE_GATE_REASONING_EFFORT,
+    outputSchema: distAsset("chat-gate-schema.json"),
+    disableWebTools: true,
   });
   const timeoutMs = opts.timeoutMs ?? getMuseTimeoutMs();
+  const startedMs = Date.now();
 
   console.log(JSON.stringify({ msg: "chat gate start", workspace: opts.workspace, promptLength: prompt.length }));
   let result: Awaited<ReturnType<typeof runner>>;
@@ -170,6 +174,6 @@ export async function runChatGate(opts: ChatRunOptions): Promise<ChatGate> {
   if (!gate) {
     throw new Error(`chat gate returned no usable reply (exit ${result.exitCode})`);
   }
-  console.log(JSON.stringify({ msg: "chat gate result", mode: gate.mode }));
+  console.log(JSON.stringify({ msg: "chat gate result", mode: gate.mode, elapsedMs: Date.now() - startedMs, stdoutLength: result.stdout.length }));
   return gate;
 }

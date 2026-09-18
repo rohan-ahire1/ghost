@@ -1,5 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { buildChatPrompt, parseChatGate, runChatGate } from "../dist/chat.js";
 
 describe("chat gate prompt", () => {
@@ -70,13 +71,21 @@ describe("chat gate runner", () => {
     assert.deepEqual(g, { mode: "chat", reply: "yo" });
     assert.ok(seen.args.includes("/tmp/chat-ws"));
     const effort = seen.args[seen.args.indexOf("--reasoning-effort") + 1];
-    assert.equal(effort, "low");
+    assert.equal(effort, "minimal");
     const steps = seen.args[seen.args.indexOf("--max-model-steps") + 1];
-    assert.equal(steps, "15");
+    assert.equal(steps, "5");
+    assert.ok(seen.args.includes("--disable-web-tools"));
+    assert.ok(seen.args[seen.args.indexOf("--output-schema") + 1].endsWith("chat-gate-schema.json"));
   });
 
   it("throws when the model returns nothing usable", async () => {
     const runner = async () => ({ stdout: "", stderr: "oops", exitCode: 1, timedOut: false, truncated: false });
     await assert.rejects(() => runChatGate({ workspace: "/tmp/x", message: "hi", history: [], runner, museBin: "/bin/muse" }));
+  });
+
+  it("ships a valid gate schema in dist", () => {
+    const schema = JSON.parse(readFileSync(new URL("../dist/chat-gate-schema.json", import.meta.url), "utf-8"));
+    assert.deepEqual(schema.properties.mode.enum, ["chat", "fetch"]);
+    assert.deepEqual(schema.required, ["mode", "reply"]);
   });
 });

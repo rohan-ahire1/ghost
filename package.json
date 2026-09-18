@@ -5,7 +5,7 @@
   "type": "module",
   "description": "Ghost Linear agent service",
   "scripts": {
-    "build": "rm -rf dist && tsc && cp src/muse-output-schema.json dist/muse-output-schema.json",
+    "build": "rm -rf dist && tsc && cp src/muse-output-schema.json dist/muse-output-schema.json && cp src/chat-gate-schema.json dist/chat-gate-schema.json",
     "start": "node dist/index.js",
     "dev": "tsx watch src/index.ts",
     "test": "npm run build && node --test --test-reporter=spec test/*.test.js"

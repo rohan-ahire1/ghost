@@ -1,0 +1,48 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Muse Structured Result",
+  "type": "object",
+  "required": [
+    "status",
+    "summary",
+    "questions",
+    "changed_files",
+    "validation_performed",
+    "residual_risks"
+  ],
+  "properties": {
+    "status": {
+      "type": "string",
+      "enum": ["completed", "blocked"]
+    },
+    "summary": {
+      "type": "string",
+      "maxLength": 4000
+    },
+    "questions": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "changed_files": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "validation_performed": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "residual_risks": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  },
+  "additionalProperties": false
+}

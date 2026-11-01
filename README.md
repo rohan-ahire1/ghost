@@ -70,29 +70,85 @@ Other protections:
 
 ## Running it
 
-You need Node 18 or newer, a Linear API key and webhook secret, and the Muse Code CLI for the model calls. The repo list in `src/repoResolver.ts` and the default paths in the source point at my own setup, so change those first.
+Ghost was built for one person's setup, so a few steps below need code edits. You need:
+
+- Node 18 or newer
+- Admin access to a Linear workspace
+- The Muse Code CLI, installed and signed in
+- A public HTTPS URL that forwards to Ghost, from a reverse proxy or a tunnel
+- Local clones of your repos with SSH push access to `origin`
+
+### 1. Install and test
 
 ```bash
+git clone https://github.com/rohan-ahire1/ghost.git
+cd ghost
 npm install
 npm test
+```
+
+### 2. Point Ghost at your repos
+
+Replace the `DEFAULT_REPOS` list in `src/repoResolver.ts` with your own repos. Each entry has an id, aliases, a local path, the GitHub `owner/repo` and the default branch. The list is compiled in, and `GHOST_REPO_MAP` can only change the paths of repos already on it. The git steps use `origin/main`, so each repo needs a `main` branch.
+
+If you don't use Muse Code, the model calls are in `src/museRunner.ts`. The provider and model are constants at the top of that file, and the rest of Ghost only depends on the JSON result it parses.
+
+### 3. Create the Linear app
+
+Create an OAuth application at [linear.app/settings/api/applications/new](https://linear.app/settings/api/applications/new) and set:
+
+- Callback URL: `https://your-host/linear/oauth/callback`
+- Webhook URL: `https://your-host/linear/webhook`
+- Webhook events: Agent session events
+
+Copy the client ID, client secret and webhook signing secret. Then create a personal API key under your Linear security settings. Linear's [agent docs](https://linear.app/developers/agents) have the details.
+
+### 4. Start Ghost
+
+```bash
 npm run build
 
-LINEAR_API_KEY=... LINEAR_WEBHOOK_SECRET=... GHOST_DATA_DIR=/tmp/ghost-data npm start
+export LINEAR_CLIENT_ID=...
+export LINEAR_CLIENT_SECRET=...
+export LINEAR_REDIRECT_URI=https://your-host/linear/oauth/callback
+export LINEAR_WEBHOOK_SECRET=...
+export LINEAR_API_KEY=...
+export GHOST_DATA_DIR="$HOME/.config/ghost"
+export GHOST_MUSE_BIN="$(command -v muse)"
+export GITHUB_TOKEN=...   # optional
+
+npm start
 ```
+
+Ghost listens on `127.0.0.1:8791`. Forward your public URL to that port, then check `https://your-host/health`. It should return `{"status":"ok","service":"ghost"}`.
+
+### 5. Install it in your workspace
+
+Open `http://127.0.0.1:8791/linear/install` in a browser on the same machine, or through an SSH tunnel. This route only answers on loopback. Approve the install as a workspace admin. Linear needs this app install because a personal API key can't post agent activity.
+
+### 6. Try it
+
+Mention the app on a Linear issue and name one of your repos, for example "@ghost add a health check to my-repo". You should see updates in the issue, then a pull request or a compare link. If nothing happens, `curl 127.0.0.1:8791/ops` shows recent jobs and the last failure.
+
+### Settings
 
 | Variable | Purpose |
 |---|---|
-| `LINEAR_API_KEY` | Linear personal API key |
-| `LINEAR_WEBHOOK_SECRET` | Verifies incoming webhooks |
-| `GHOST_PORT`, `GHOST_HOST` | Bind address, `127.0.0.1:8791` in production |
-| `GHOST_DATA_DIR` | Jobs, worktrees and delivery records |
+| `LINEAR_CLIENT_ID`, `LINEAR_CLIENT_SECRET` | Linear OAuth app. Required |
+| `LINEAR_REDIRECT_URI` | Must match the app's callback URL. Required |
+| `LINEAR_WEBHOOK_SECRET` | Verifies incoming webhooks. Required |
+| `LINEAR_API_KEY` | Personal key for reads. Required, or save it to `~/.config/linear/api_key` |
+| `GHOST_DATA_DIR` | Jobs, worktrees and tokens. Set this, because the default is my home folder |
+| `GHOST_MUSE_BIN` | Model CLI path. Set this for the same reason |
+| `MODEL_API_KEY` | The only credential passed to the model process, if your CLI needs one |
+| `GHOST_PORT`, `GHOST_HOST` | Bind address, default `127.0.0.1:8791` |
 | `GITHUB_TOKEN` or `GH_TOKEN` | Opens PRs. Without it you get a compare link |
 | `GHOST_PROJECT_MAP` | JSON map from Linear project to repo id |
 | `GHOST_REPO_MAP` | JSON map from repo id to local path |
 | `GHOST_MAX_CONCURRENT_MUSE` | Parallel model runs, 1 to 8, default 2 |
-| `GHOST_MUSE_BIN`, `GHOST_MUSE_TIMEOUT_MS` | Model CLI path and timeout |
+| `GHOST_MUSE_TIMEOUT_MS` | Model run timeout, default 600000 |
 
-`scripts/deploy.sh` backs up the current release, syncs the code, builds and tests on the server, restarts, checks health, and rolls back on failure.
+`scripts/deploy.sh` backs up the current release, syncs the code, builds and tests on the server, restarts, checks health, and rolls back on failure. Its SSH target and paths are mine, so edit them before using it.
 
 ## Tests
 
